@@ -1,0 +1,50 @@
+name: Update Formula
+
+on:
+  schedule:
+    - cron: '0 12 * * *'  # Daily at noon UTC
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check PyPI for latest version
+        id: check
+        run: |
+          LATEST=$(curl -s https://pypi.org/pypi/mlx-audiogen/json | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['version'])")
+          CURRENT=$(grep -oP 'mlx_audiogen-\K[0-9.]+' Formula/mlx-audiogen.rb | head -1)
+          echo "latest=$LATEST" >> $GITHUB_OUTPUT
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          if [ "$LATEST" != "$CURRENT" ]; then
+            echo "needs_update=true" >> $GITHUB_OUTPUT
+            SHA=$(curl -s https://pypi.org/pypi/mlx-audiogen/json | python3 -c "import sys,json; d=json.load(sys.stdin); urls=[u for u in d['urls'] if u['packagetype']=='sdist']; print(urls[0]['digests']['sha256'])")
+            echo "sha256=$SHA" >> $GITHUB_OUTPUT
+          else
+            echo "needs_update=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update formula
+        if: steps.check.outputs.needs_update == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.latest }}
+          SHA: ${{ steps.check.outputs.sha256 }}
+        run: |
+          sed -i "s|mlx_audiogen-[0-9.]*\.tar\.gz|mlx_audiogen-${VERSION}.tar.gz|" Formula/mlx-audiogen.rb
+          sed -i "s|sha256 \".*\"|sha256 \"${SHA}\"|" Formula/mlx-audiogen.rb
+
+      - name: Commit and push
+        if: steps.check.outputs.needs_update == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.latest }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/mlx-audiogen.rb
+          git commit -m "chore: update mlx-audiogen to ${VERSION}"
+          git push
