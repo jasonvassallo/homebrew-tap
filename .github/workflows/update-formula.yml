@@ -17,17 +17,48 @@ jobs:
       - name: Check PyPI for latest version
         id: check
         run: |
-          LATEST=$(curl -s https://pypi.org/pypi/mlx-audiogen/json | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['version'])")
-          CURRENT=$(grep -oP 'mlx_audiogen-\K[0-9.]+' Formula/mlx-audiogen.rb | head -1)
-          echo "latest=$LATEST" >> $GITHUB_OUTPUT
-          echo "current=$CURRENT" >> $GITHUB_OUTPUT
-          if [ "$LATEST" != "$CURRENT" ]; then
-            echo "needs_update=true" >> $GITHUB_OUTPUT
-            SHA=$(curl -s https://pypi.org/pypi/mlx-audiogen/json | python3 -c "import sys,json; d=json.load(sys.stdin); urls=[u for u in d['urls'] if u['packagetype']=='sdist']; print(urls[0]['digests']['sha256'])")
-            echo "sha256=$SHA" >> $GITHUB_OUTPUT
-          else
-            echo "needs_update=false" >> $GITHUB_OUTPUT
-          fi
+          curl --fail --silent --show-error --location \
+            https://pypi.org/pypi/mlx-audiogen/json \
+            --output pypi.json
+
+          python3 <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          data = json.loads(Path("pypi.json").read_text())
+          latest = data["info"]["version"]
+          sdists = [
+              url for url in data["urls"]
+              if url.get("packagetype") == "sdist"
+              and url.get("filename") == f"mlx_audiogen-{latest}.tar.gz"
+          ]
+          if not sdists:
+              raise SystemExit(f"No sdist found for mlx-audiogen {latest}")
+
+          sha256 = sdists[0]["digests"]["sha256"]
+          formula = Path("Formula/mlx-audiogen.rb").read_text()
+          version_match = re.search(
+              r"mlx_audiogen-(?P<version>[0-9]+(?:\.[0-9]+)*)\.tar\.gz",
+              formula,
+          )
+          sha_match = re.search(r'^\s*sha256\s+"(?P<sha256>[0-9a-f]{64})"', formula, re.M)
+          if not version_match:
+              raise SystemExit("Could not find current formula version")
+          if not sha_match:
+              raise SystemExit("Could not find current formula sha256")
+
+          current = version_match.group("version")
+          current_sha256 = sha_match.group("sha256")
+          needs_update = latest != current or sha256 != current_sha256
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"latest={latest}\n")
+              output.write(f"current={current}\n")
+              output.write(f"sha256={sha256}\n")
+              output.write(f"needs_update={str(needs_update).lower()}\n")
+          PY
 
       - name: Update formula
         if: steps.check.outputs.needs_update == 'true'
@@ -35,14 +66,37 @@ jobs:
           VERSION: ${{ steps.check.outputs.latest }}
           SHA: ${{ steps.check.outputs.sha256 }}
         run: |
-          sed -i "s|mlx_audiogen-[0-9.]*\.tar\.gz|mlx_audiogen-${VERSION}.tar.gz|" Formula/mlx-audiogen.rb
-          sed -i "s|sha256 \".*\"|sha256 \"${SHA}\"|" Formula/mlx-audiogen.rb
+          python3 <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path("Formula/mlx-audiogen.rb")
+          formula = path.read_text()
+          formula = re.sub(
+              r"mlx_audiogen-[0-9]+(?:\.[0-9]+)*\.tar\.gz",
+              f"mlx_audiogen-{os.environ['VERSION']}.tar.gz",
+              formula,
+              count=1,
+          )
+          formula = re.sub(
+              r'sha256 "[0-9a-f]{64}"',
+              f'sha256 "{os.environ["SHA"]}"',
+              formula,
+              count=1,
+          )
+          path.write_text(formula)
+          PY
 
       - name: Commit and push
         if: steps.check.outputs.needs_update == 'true'
         env:
           VERSION: ${{ steps.check.outputs.latest }}
         run: |
+          if git diff --quiet -- Formula/mlx-audiogen.rb; then
+            echo "Formula is already up to date."
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/mlx-audiogen.rb
